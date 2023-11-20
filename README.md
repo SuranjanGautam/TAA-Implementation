@@ -1,5 +1,5 @@
 # TAA Implementation
-Based on http://behindthepixels.io/assets/files/TemporalAA.pdf
+Based on [A Survey of Temporal Antialiasing Techniques](http://behindthepixels.io/assets/files/TemporalAA.pdf)
 
 ![Screenshot 2023-11-20 103446](https://github.com/suranjanRedtail/TAA-Implementation/assets/78081677/37509dee-6e1e-41cf-b8cc-2b4100be78f4)
 ![Screenshot 2023-11-20 103515](https://github.com/suranjanRedtail/TAA-Implementation/assets/78081677/5e3df259-9e10-4757-bf1f-a5257759ecd5)
