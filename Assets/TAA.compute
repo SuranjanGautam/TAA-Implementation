@@ -1,0 +1,245 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> HistoryBuff;
+Texture2D<float4> History;
+Texture2D<float4> Input;
+RWTexture2D<float4> Debug;
+SamplerState samplerInput;
+Texture2D<float> Depth;
+SamplerState MyLinearClampSampler;
+SamplerState MyPointClampSampler;
+Texture2D<half2> Motion;
+
+int height;
+int width;
+
+half Depththreshold;
+float weightStationary;
+half jitterx,jittery;
+bool debug;
+bool rgb;
+bool clipaabb;
+
+
+inline float Linear01Depth(float z)
+{    
+    float x = (100.0 - 0.3)/0.3;
+    float y = 1.0;
+    return 1.0 / (x * z + y);
+}
+float LinearEyeDepth_float(float InDepth)
+{ 
+    float x = (float) (100.0 - 0.3) / (0.3 * 1000);
+    float y = (float) (1.0f / 100.0);
+    return 1.0 / (x * InDepth + y);
+}
+
+float3 f2f3(float f)
+{
+    return float3(f, f, f);
+
+}
+
+float3 RGBtoYUV(float3 rgb)
+{
+    float3x3 TransMatrix =
+    {
+        { 0.299, 0.587, 0.114 },
+        { -0.14713, -0.28886, 0.436 },
+        { 0.615, -0.51499, -0.10001 },
+    };
+    return mul(TransMatrix, rgb);
+}
+
+float3 RGBtoYCoCg(float3 rgb)
+{
+    float3x3 TransMatrix =
+    {
+        { 0.25, 0.5, 0.25 },
+        { 0.5, 0, -0.5 },
+        { -0.25, 0.5, -0.25 },
+    };
+    return mul(TransMatrix, rgb);
+}
+
+float3 YCoCgtoRGB(float3 rgb)
+{
+    float3x3 TransMatrix =
+    {
+        { 1, 1, -1 },
+        { 1, 0, 1 },
+        { 1, -1, -1 },
+    };
+    return mul(TransMatrix, rgb);
+}
+
+float4 Box3X3(Texture2D<float4> tex, int2 loc)
+{
+    float4 output = tex[loc];
+    if(loc.x>0 && loc.y>0 && loc.x<width-1 && loc.y<height-1)
+    {
+        output += tex[int2(loc.x - 1, loc.y - 1)] +
+        tex[int2(loc.x - 1, loc.y)] +
+        tex[int2(loc.x - 1, loc.y + 1)] +
+        tex[int2(loc.x, loc.y - 1)] +
+        tex[int2(loc.x, loc.y + 1)] +
+        tex[int2(loc.x + 1, loc.y - 1)] +
+        tex[int2(loc.x + 1, loc.y)] +
+        tex[int2(loc.x + 1, loc.y + 1)];
+        output /= 9.0;
+    }
+    return output;
+}
+float4 Box3X3(RWTexture2D<float4> tex, int2 loc)
+{
+    float4 output = tex[loc];
+    if (loc.x > 0 && loc.y > 0 && loc.x < width - 1 && loc.y < height - 1)
+    {
+        output += 
+        tex[int2(loc.x - 1, loc.y - 1)] +
+        tex[int2(loc.x - 1, loc.y)] +
+        tex[int2(loc.x - 1, loc.y + 1)] +
+        tex[int2(loc.x, loc.y - 1)] +
+        tex[int2(loc.x, loc.y + 1)] +
+        tex[int2(loc.x + 1, loc.y - 1)] +
+        tex[int2(loc.x + 1, loc.y)] +
+        tex[int2(loc.x + 1, loc.y + 1)];
+        output /= 9.0;
+    }
+    return output;
+}
+
+float2 PixeltoUV(int2 xy)
+{
+    return float2(((float) xy.x / (width - 1)), ((float) xy.y / (height - 1)));
+}
+
+float2 ClosestDepthUV(float2 uv,float2 k)
+{
+    const float4 neighborhood = float4(
+                Depth.SampleLevel( MyPointClampSampler, (uv - k),0),
+                Depth.SampleLevel(MyPointClampSampler, (uv + float2(k.x, -k.y)),0),
+                Depth.SampleLevel(MyPointClampSampler, (uv + float2(-k.x, k.y)),0),
+                Depth.SampleLevel(MyPointClampSampler, (uv + k),0)
+            );
+
+#if defined(UNITY_REVERSED_Z)
+#define COMPARE_DEPTH(a, b) step(b, a)
+#else
+#define COMPARE_DEPTH(a, b) step(a, b)
+#endif
+
+    float3 result = float3(0.0, 0.0, Depth.SampleLevel(MyPointClampSampler, uv,0));
+    result = lerp(result, float3(-1.0, -1.0, neighborhood.x), COMPARE_DEPTH(neighborhood.x, result.z));
+    result = lerp(result, float3(1.0, -1.0, neighborhood.y), COMPARE_DEPTH(neighborhood.y, result.z));
+    result = lerp(result, float3(-1.0, 1.0, neighborhood.z), COMPARE_DEPTH(neighborhood.z, result.z));
+    result = lerp(result, float3(1.0, 1.0, neighborhood.w), COMPARE_DEPTH(neighborhood.w, result.z));
+
+    return (uv + (result.xy * k));
+}
+
+float4 ClipAABB(float4 color, float3 maximum, float3 minimum)
+{  
+    float3 center = (maximum + minimum) * 0.5;
+    float3 extends = (maximum - minimum) * 0.5;
+    
+    float3 diff = color.xyz - center;
+    float3 frac = abs(extends / diff);
+    float a = saturate(min(min(frac.x, frac.y), frac.z));
+    return float4(center + (diff * a), color.w);
+}
+
+float4 ManualBilinearSample(RWTexture2D<float4> tex, float2 uv, float2 texelSize)
+{    
+    // Calculate the position on the texture in texel units
+    float2 texelPos = uv * float2(width-1,height-1);
+
+    // Calculate the integer part (the texel to sample from)
+    int2 iTexelPos = int2(floor(texelPos));
+
+    // Calculate the fractional part (the blend factors)
+    float2 Frac = frac(texelPos);
+
+    // Sample the four nearest texels
+    float4 tl = tex[iTexelPos];
+    float4 tr = tex[iTexelPos + int2(1, 0)];
+    float4 bl = tex[iTexelPos + int2(0, 1)];
+    float4 br = tex[iTexelPos + int2(1, 1)];
+
+    // Interpolate between the top two texels
+    float4 tInterp = lerp(tl, tr, Frac.x);
+
+    // Interpolate between the bottom two texels
+    float4 bInterp = lerp(bl, br, Frac.x);
+
+    // Interpolate between the top and bottom interpolation results
+    float4 bilinearSample = lerp(tInterp, bInterp, Frac.y);
+
+    return bilinearSample;
+}
+
+[numthreads(32,32,1)]
+void CSMain(uint3 groupID : SV_GroupID, uint3 id : SV_GroupThreadID)
+{       
+    uint2 xy = uint2((groupID.x * 32) + id.x, (groupID.y * 32) + id.y);
+    float2 uv = PixeltoUV(xy);
+    uv += (float2(jitterx, jittery));
+    float2 texelsize = float2(1.0 / (width), 1.0 / (height));
+    if (xy.x < width && xy.y < height)
+    {
+        float depthsample = Depth.SampleLevel(MyLinearClampSampler, uv,0).x;
+        //half2 motion = Motion.Gather(MyLinearClampSampler, uv).xy;
+        half2 motion = Motion.SampleLevel(MyLinearClampSampler, ClosestDepthUV(uv,texelsize), 0);
+        //motion -= half2(jitterx,jittery);
+        //motion = motion * half2(width/2, height/2);
+        float2 uvcorrected = uv - (float2(jitterx, jittery)) - motion;
+        bool moving = length(motion * half2((width), (height))) > 0.0001;
+        uint2 xycorrected = (xy - (motion * half2((width), (height))));
+        xycorrected = moving ? xycorrected : xy;
+        
+        float4 inputcolor = Input.SampleLevel(MyPointClampSampler, uv, 0);
+        //float4 historycolor = History.SampleLevel(MyLinearClampSampler, uv - motion, 0);
+        //float4 historycolor = HistoryBuff[xycorrected];
+        float4 historycolor = ManualBilinearSample(HistoryBuff, uvcorrected, texelsize);
+        
+        float3 top = Input.SampleLevel(MyLinearClampSampler, uv + float2(0, texelsize.y), 0).xyz;
+        float3 bottom = Input.SampleLevel(MyLinearClampSampler, uv + float2(0, -texelsize.y), 0).xyz;
+        float3 left = Input.SampleLevel(MyLinearClampSampler, uv + float2(-texelsize.x, 0), 0).xyz;
+        float3 right = Input.SampleLevel(MyLinearClampSampler, uv + float2(texelsize.x, 0), 0).xyz;
+        
+        bool valid = xycorrected.x >= 0 && xycorrected.x < width && xycorrected.y >= 0 && xycorrected.y < height;
+        
+        top = rgb?top: RGBtoYCoCg(top);
+        bottom = rgb ?bottom: RGBtoYCoCg(bottom);
+        left = rgb ? left:RGBtoYCoCg(left);
+        right = rgb ? right:RGBtoYCoCg(right);
+        
+        float3 inputclipcolorsspace = rgb?inputcolor.xyz: RGBtoYCoCg(inputcolor.xyz);
+        float3 minimum = min(min(min(min(top, bottom), left), right), inputclipcolorsspace);
+        float3 maximum = max(max(max(max(top, bottom), left), right), inputclipcolorsspace);
+        float3 historyclipcolor = rgb ? historycolor.xyz : RGBtoYCoCg(historycolor.xyz);
+          
+        if (clipaabb)
+        {            
+            historycolor = ClipAABB(float4((historyclipcolor), historycolor.w), maximum, minimum);
+            if(!rgb)
+                historycolor.xyz = YCoCgtoRGB(historycolor.xyz);
+        }
+        
+        float weightEvaluated = valid ? (moving ? 0.15 : 0.05) : 1;
+       
+        float4 output = float4(lerp(historycolor.xyz,inputcolor.xyz,weightEvaluated), inputcolor.w);
+        //output = Input.SampleLevel(MyLinearClampSampler, uv, 0);
+        //output = float4(YCoCgtoRGB(ClipAABB(float4(RGBtoYCoCg(inputcolor.xyz), historycolor.w), maximum, minimum).xyz), inputcolor.w);
+        Debug[xy] = float4(f2f3(weightEvaluated), output.w);
+        HistoryBuff[xy] = output;
+    }    
+}
+
+
+
+
+
