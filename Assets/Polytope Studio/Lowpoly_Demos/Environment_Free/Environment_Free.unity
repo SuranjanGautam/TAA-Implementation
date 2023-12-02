@@ -1896,6 +1896,7 @@ MonoBehaviour:
   JitterStrength: 0.75
   ClipAABB: 1
   ClipRGBSpace: 1
+  ClipParameter: 1
   seq:
   - {x: 0.5, y: 0.5}
   - {x: 1, y: 0.8333334}
@@ -1935,8 +1936,8 @@ MonoBehaviour:
   temporalAntialiasing:
     jitterSpread: 0.75
     sharpness: 0
-    stationaryBlending: 0.95
-    motionBlending: 0.85
+    stationaryBlending: 0
+    motionBlending: 0
   subpixelMorphologicalAntialiasing:
     quality: 2
   fastApproximateAntialiasing:

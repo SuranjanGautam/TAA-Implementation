@@ -32,7 +32,9 @@ public class TAA : MonoBehaviour
     bool ClipAABB = true;
     [SerializeField]
     bool ClipRGBSpace = false;
-    
+    [SerializeField]
+    float ClipParameter = 1;
+
 
     [SerializeField]
     List<Vector2> seq;
@@ -90,17 +92,26 @@ public class TAA : MonoBehaviour
         if (enable)
         {
             var newPM = Matrix4x4.identity;
-            float jitterX = (seq[index].x - 0.5f) * 2*JitterStrength / Screen.width;
-            float jitterY = (seq[index].y - 0.5f) * 2*JitterStrength / Screen.height;
-            ComputerShaderTAA.SetFloat("jitterx", jitterX);
-            ComputerShaderTAA.SetFloat("jittery", jitterY);
+            float jitterX = (((seq[index].x) - 0.5f) * JitterStrength * 2) / Screen.width;
+            float jitterY = (((seq[index].y) - 0.5f) * JitterStrength * 2) / Screen.height;
             newPM.m03 = jitterX;
             newPM.m13 = jitterY;
+
             var temp = Camera.projectionMatrix;
+            var temp2 = Camera.projectionMatrix;
+
+            temp2.m02 += jitterX;
+            temp2.m12 += jitterY;
+
             Camera.projectionMatrix = newPM * Camera.projectionMatrix;
+            //Camera.projectionMatrix = temp2;
             Camera.nonJitteredProjectionMatrix = temp;
             index = (index + 1) % seq.Count;
+
+            ComputerShaderTAA.SetFloat("jitterx", jitterX);
+            ComputerShaderTAA.SetFloat("jittery", jitterY);
         }
+
     }
 
     private void OnRenderImage(RenderTexture source, RenderTexture destination)
@@ -127,6 +138,7 @@ public class TAA : MonoBehaviour
             
             ComputerShaderTAA.SetFloat("Depththreshold", depthThreshold);
             ComputerShaderTAA.SetFloat("weight", reset?1:weight);
+            ComputerShaderTAA.SetFloat("chipparameter", ClipParameter);
             reset = !reset && reset;
             ComputerShaderTAA.SetInt("height", Screen.height);
             ComputerShaderTAA.SetInt("width", Screen.width);
@@ -135,10 +147,12 @@ public class TAA : MonoBehaviour
             ComputerShaderTAA.SetBool("clipaabb", ClipAABB);
 
             ComputerShaderTAA.Dispatch(0, Mathf.CeilToInt((float)Screen.width / 32), Mathf.CeilToInt((float)Screen.height / 32), 1);
-            if(debug)
+            
+            if (debug)
                 Graphics.Blit(DebugBuffer, destination);
             else
-                Graphics.Blit(HistoryBuffer, destination);                        
+                Graphics.Blit(HistoryBuffer, destination);
+
         }
         else
         {

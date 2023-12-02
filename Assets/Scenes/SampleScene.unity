@@ -533,11 +533,16 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   HistoryBuffer: {fileID: 0}
+  DebugBuffer: {fileID: 0}
   enable: 1
+  debug: 0
   ComputerShaderTAA: {fileID: 7200000, guid: 797798ff1c512ed47815fce361f70525, type: 3}
   weight: 0.05
   depthThreshold: 0.01
-  JitterStrength: 0.75
+  JitterStrength: 1
+  ClipAABB: 1
+  ClipRGBSpace: 1
+  ClipParameter: 1
   seq:
   - {x: 0.5, y: 0.5}
   - {x: 1, y: 0.8333334}
