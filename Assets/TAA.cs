@@ -33,7 +33,7 @@ public class TAA : MonoBehaviour
     [SerializeField]
     bool ClipRGBSpace = false;
     [SerializeField]
-    float ClipParameter = 1;
+    bool cubicfiltering = false;
 
 
     [SerializeField]
@@ -79,6 +79,9 @@ public class TAA : MonoBehaviour
         if(Input.GetKeyDown(KeyCode.Space))
         {
             enable = !enable;
+            if(!enable) {
+                HistoryBuffer.Release();
+            }
         }
         if (Input.GetKeyDown(KeyCode.X))
         {
@@ -86,32 +89,33 @@ public class TAA : MonoBehaviour
         }
     }
 
-    private void LateUpdate()
-    {
+    private void OnPreCull()
+    {         
         Camera.ResetProjectionMatrix();
         if (enable)
         {
             var newPM = Matrix4x4.identity;
-            float jitterX = (((seq[index].x) - 0.5f) * JitterStrength * 2) / Screen.width;
-            float jitterY = (((seq[index].y) - 0.5f) * JitterStrength * 2) / Screen.height;
+            float jitterX = (((seq[index].x) - 0.5f) * JitterStrength*2 ) / Screen.width;
+            float jitterY = (((seq[index].y) - 0.5f) * JitterStrength*2 ) / Screen.height;
             newPM.m03 = jitterX;
             newPM.m13 = jitterY;
 
             var temp = Camera.projectionMatrix;
-            var temp2 = Camera.projectionMatrix;
+            Camera.projectionMatrix = newPM * temp;
 
-            temp2.m02 += jitterX;
-            temp2.m12 += jitterY;
-
-            Camera.projectionMatrix = newPM * Camera.projectionMatrix;
+            //var temp2 = Camera.projectionMatrix;
+            //temp2.m30 += jitterX;
+            //temp2.m31 += jitterY;
             //Camera.projectionMatrix = temp2;
+
+
             Camera.nonJitteredProjectionMatrix = temp;
+            
+
+            ComputerShaderTAA.SetFloat("jitterx", (seq[index].x) - 0.5f);
+            ComputerShaderTAA.SetFloat("jittery", (seq[index].y) - 0.5f);
             index = (index + 1) % seq.Count;
-
-            ComputerShaderTAA.SetFloat("jitterx", jitterX);
-            ComputerShaderTAA.SetFloat("jittery", jitterY);
         }
-
     }
 
     private void OnRenderImage(RenderTexture source, RenderTexture destination)
@@ -120,13 +124,13 @@ public class TAA : MonoBehaviour
         {
             if(HistoryBuffer==null)
             {
-                CreateHistory(source);
+                CreateHistory();
             }
             if ((HistoryBuffer.width != Screen.width || HistoryBuffer.height != Screen.height))
             {
                 HistoryBuffer.Release();
                 DebugBuffer.Release();
-                CreateHistory(source);
+                CreateHistory();
             }
             ComputerShaderTAA.SetTexture(0, "HistoryBuff", HistoryBuffer);
             ComputerShaderTAA.SetTexture(0, "History", HistoryBuffer);
@@ -137,14 +141,14 @@ public class TAA : MonoBehaviour
             ComputerShaderTAA.SetTextureFromGlobal(0, "Motion", "_CameraMotionVectorsTexture");
             
             ComputerShaderTAA.SetFloat("Depththreshold", depthThreshold);
-            ComputerShaderTAA.SetFloat("weight", reset?1:weight);
-            ComputerShaderTAA.SetFloat("chipparameter", ClipParameter);
-            reset = !reset && reset;
+
             ComputerShaderTAA.SetInt("height", Screen.height);
             ComputerShaderTAA.SetInt("width", Screen.width);
             ComputerShaderTAA.SetBool("debug", debug);
             ComputerShaderTAA.SetBool("rgb", ClipRGBSpace);
             ComputerShaderTAA.SetBool("clipaabb", ClipAABB);
+            ComputerShaderTAA.SetBool("cubicfiltering", cubicfiltering);
+            ComputerShaderTAA.SetFloat("weightStationary", weight);
 
             ComputerShaderTAA.Dispatch(0, Mathf.CeilToInt((float)Screen.width / 32), Mathf.CeilToInt((float)Screen.height / 32), 1);
             
@@ -152,21 +156,19 @@ public class TAA : MonoBehaviour
                 Graphics.Blit(DebugBuffer, destination);
             else
                 Graphics.Blit(HistoryBuffer, destination);
-
         }
         else
         {
             Graphics.Blit(source, destination);
-        }        
-    }
-
-    private void CreateHistory(RenderTexture source)
-    {
-        DebugBuffer = new RenderTexture(source.width, source.height, source.depth);
-        DebugBuffer.enableRandomWrite = true;
-        HistoryBuffer = new RenderTexture(source.width, source.height, source.depth);
-        HistoryBuffer.enableRandomWrite = true;
-        reset = true;
+        }
+        void CreateHistory()
+        {
+            DebugBuffer = new RenderTexture(source.width, source.height, source.depth);
+            DebugBuffer.enableRandomWrite = true;
+            HistoryBuffer = new RenderTexture(source.width, source.height, source.depth);
+            HistoryBuffer.enableRandomWrite = true;
+            reset = true;            
+        }
     }
 
     private void OnDestroy()

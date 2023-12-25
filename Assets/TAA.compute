@@ -22,7 +22,7 @@ half jitterx,jittery;
 bool debug;
 bool rgb;
 bool clipaabb;
-float chipparameter = 1;
+bool cubicfiltering = true;
 
 
 inline float Linear01Depth(float z)
@@ -120,40 +120,91 @@ float4 ClipAABB(float4 color, float3 maximum, float3 minimum)
 
 float4 ManualBilinearSample(RWTexture2D<float4> tex, float2 uv, float2 texelSize)
 {    
-    // Calculate the position on the texture in texel units
     float2 texelPos = uv * float2(width-1,height-1);
 
-    // Calculate the integer part (the texel to sample from)
+
     int2 iTexelPos = int2(floor(texelPos));
 
-    // Calculate the fractional part (the blend factors)
+
     float2 Frac = frac(texelPos);
 
-    // Sample the four nearest texels
+
     float4 tl = tex[iTexelPos];
     float4 tr = tex[iTexelPos + int2(1, 0)];
     float4 bl = tex[iTexelPos + int2(0, 1)];
     float4 br = tex[iTexelPos + int2(1, 1)];
 
-    // Interpolate between the top two texels
     float4 tInterp = lerp(tl, tr, Frac.x);
-
-    // Interpolate between the bottom two texels
     float4 bInterp = lerp(bl, br, Frac.x);
-
-    // Interpolate between the top and bottom interpolation results
+    
     float4 bilinearSample = lerp(tInterp, bInterp, Frac.y);
 
     return bilinearSample;
 }
 
+float MinusOnePower(float2 i)
+{
+    if(fmod(i.x + i.y, 2)<1)
+    {
+        return 1;
+    }
+    else
+        return -1;
+}
+
+
+float4 SampleTextureCatmullRom(RWTexture2D<float4> tex, float2 uv, float2 texSize)
+{
+    float2 samplePos = uv / texSize;
+    float2 texPos1 = floor(samplePos - 0.5f) + 0.5f;
+
+    // Compute the fractional offset from our starting texel to our original sample location, which we'll
+    // feed into the Catmull-Rom spline function to get our filter weights.
+    float2 f = samplePos - texPos1;
+
+    // Compute the Catmull-Rom weights using the fractional offset that we calculated earlier.
+    // These equations are pre-expanded based on our knowledge of where the texels will be located,
+    // which lets us avoid having to evaluate a piece-wise function.
+    float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
+    float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
+    float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
+    float2 w3 = f * f * (-0.5f + 0.5f * f);
+
+    // Work out weighting factors and sampling offsets that will let us use bilinear filtering to
+    // simultaneously evaluate the middle 2 samples from the 4x4 grid.
+    float2 w12 = w1 + w2;
+    float2 offset12 = w2 / (w1 + w2);
+
+    // Compute the final UV coordinates we'll use for sampling the texture
+    float2 texPos0 = texPos1 - 1;
+    float2 texPos3 = texPos1 + 2;
+    float2 texPos12 = texPos1 + offset12;
+
+    texPos0 *= texSize;
+    texPos3 *= texSize;
+    texPos12 *= texSize;
+
+    float4 result = 0.0f;
+    result += ManualBilinearSample(tex, float2(texPos0.x, texPos0.y), texSize) * w0.x * w0.y;
+    result += ManualBilinearSample(tex, float2(texPos12.x, texPos0.y), texSize) * w12.x * w0.y;
+    result += ManualBilinearSample(tex, float2(texPos3.x, texPos0.y), texSize) * w3.x * w0.y;
+
+    result += ManualBilinearSample(tex, float2(texPos0.x, texPos12.y), texSize) * w0.x * w12.y;
+    result += ManualBilinearSample(tex, float2(texPos12.x, texPos12.y), texSize) * w12.x * w12.y;
+    result += ManualBilinearSample(tex, float2(texPos3.x, texPos12.y), texSize) * w3.x * w12.y;
+
+    result += ManualBilinearSample(tex, float2(texPos0.x, texPos3.y), texSize) * w0.x * w3.y;
+    result += ManualBilinearSample(tex, float2(texPos12.x, texPos3.y), texSize) * w12.x * w3.y;
+    result += ManualBilinearSample(tex, float2(texPos3.x, texPos3.y), texSize) * w3.x * w3.y;
+
+    return result;
+}
+
+
 float4 ManualPointSample(RWTexture2D<float4> tex, float2 uv, float2 texelSize)
 {
-    // Calculate the position on the texture in texel units
     float2 texelPos = uv * float2(width - 1, height - 1);
-
     return tex[round(texelPos)];
-
 }
 
 [numthreads(32,32,1)]
@@ -162,32 +213,24 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 id : SV_GroupThreadID)
     uint2 xy = uint2((groupID.x * 32) + id.x, (groupID.y * 32) + id.y);
     float2 texelsize = float2(1.0 / (width), 1.0 / (height));
     float2 uv = PixeltoUV(xy,texelsize);
-    float2 jitter = float2(jitterx, jittery)*0.5;
+    float2 jitter = float2(jitterx, jittery)*texelsize;
     
     if (xy.x < width && xy.y < height)
     {
-        float2 uvcurrent = uv + jitter;
-        float depthsample = Depth.SampleLevel(MyLinearClampSampler, uv,0).x;
-        //half2 motion = Motion.Gather(MyLinearClampSampler, uv).xy;
-        half2 motion = Motion.SampleLevel(MyLinearClampSampler, ClosestDepthUV(uvcurrent,texelsize), 0);
-        //motion -= half2(jitterx,jittery);
-        //motion = motion * half2(width/2, height/2);
+        half2 motion = Motion.SampleLevel(MyLinearClampSampler, ClosestDepthUV(uv,texelsize), 0);
         float2 uvcorrected = uv - motion;
-        bool moving = length(motion * half2((width), (height))) > 0.0001;
-        uint2 xycorrected = (xy - (motion * half2((width), (height))));
-        xycorrected = moving ? xycorrected : xy;
+        bool moving = length(motion * half2((width), (height))) > texelsize.x/100;
+
         
-        float4 inputcolor = Input.SampleLevel(MyLinearClampSampler, uvcurrent, 0);
-        //float4 historycolor = History.SampleLevel(MyLinearClampSampler, uv - motion, 0);
-        //float4 historycolor = HistoryBuff[xycorrected];
-        float4 historycolor = ManualBilinearSample(HistoryBuff, uvcorrected, texelsize);
+        float4 inputcolor = Input.SampleLevel(MyPointClampSampler, uv, 0);
+        float4 historycolor = cubicfiltering ? (SampleTextureCatmullRom(HistoryBuff, uvcorrected, texelsize)) : (ManualBilinearSample(HistoryBuff, uvcorrected, texelsize));
         
-        float3 top = Input.SampleLevel(MyLinearClampSampler, uvcurrent + float2(0, texelsize.y) * chipparameter, 0).xyz;
-        float3 bottom = Input.SampleLevel(MyLinearClampSampler, uvcurrent + float2(0, -texelsize.y) * chipparameter, 0).xyz;
-        float3 left = Input.SampleLevel(MyLinearClampSampler, uvcurrent + float2(-texelsize.x, 0) * chipparameter, 0).xyz;
-        float3 right = Input.SampleLevel(MyLinearClampSampler, uvcurrent + float2(texelsize.x, 0) * chipparameter, 0).xyz;
+        float3 top = Input.SampleLevel(MyLinearClampSampler, uv + (float2(0, texelsize.y) * 1), 0).xyz;
+        float3 bottom = Input.SampleLevel(MyLinearClampSampler, uv + (float2(0, -texelsize.y) * 1), 0).xyz;
+        float3 left = Input.SampleLevel(MyLinearClampSampler, uv + (float2(texelsize.x, 0) * 1), 0).xyz;
+        float3 right = Input.SampleLevel(MyLinearClampSampler, uv + (float2(-texelsize.x, 0) * 1), 0).xyz;
         
-        bool valid = xycorrected.x >= 0 && xycorrected.x < width && xycorrected.y >= 0 && xycorrected.y < height;
+        bool valid = uvcorrected.x >= 0 && uvcorrected.x <= 1 && uvcorrected.y >= 0 && uvcorrected.y <= 1;
         
         top = rgb?top: RGBtoYCoCg(top);
         bottom = rgb ?bottom: RGBtoYCoCg(bottom);
@@ -206,12 +249,9 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 id : SV_GroupThreadID)
                 historycolor.xyz = YCoCgtoRGB(historycolor.xyz);
         }
         
-        float weightEvaluated = valid ? (moving ? 0.15 : 0.05) : 1;
+        float weightEvaluated = valid ? (moving ? 0.15 : weightStationary) : 1;
        
-        float4 output = float4(lerp(historycolor.xyz,inputcolor.xyz,weightEvaluated), inputcolor.w);
-        //output = Input.SampleLevel(MyLinearClampSampler, uv, 0);
-        //output = float4(YCoCgtoRGB(ClipAABB(float4(RGBtoYCoCg(inputcolor.xyz), historycolor.w), maximum, minimum).xyz), inputcolor.w);
-        //Debug[xy] = float4(f2f3(weightEvaluated), output.w);
+        float4 output = float4(lerp(historycolor.xyz,inputcolor.xyz,weightEvaluated), 1);
         Debug[xy] = inputcolor;
         HistoryBuff[xy] = output;
     }    
